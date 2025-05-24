@@ -4,7 +4,9 @@ import time
 import random
 import os
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import zipfile
+import io
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -12,36 +14,14 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-from pathlib import Path
-import zipfile
-import io
-import platform
-import os
-
-def is_cloud_environment():
-    """Detect if running in cloud environment"""
-    return (
-        os.environ.get('STREAMLIT_SHARING_MODE') or  # Streamlit Cloud
-        os.environ.get('RAILWAY_ENVIRONMENT') or     # Railway
-        os.environ.get('RENDER') or                  # Render
-        platform.system() == 'Linux'                # Most cloud platforms
-    )
-if is_cloud_environment():
-    DEFAULT_MAX_WORKERS = 1
-    DEFAULT_DELAY_RANGE = (2, 5)  # Longer delays for stability
-else:
-    DEFAULT_MAX_WORKERS = 3
-    DEFAULT_DELAY_RANGE = (1, 3)
-
+from google.cloud import storage  # Optional, for GCS
 
 # Configuration
 DEFAULT_DELAY_RANGE = (1, 3)
 DEFAULT_MAX_WORKERS = 3
 
-# Set up default download directory
-DOWNLOADS_DIR = Path.home() / "Downloads"
-CLUTCH_DATA_DIR = DOWNLOADS_DIR / "clutch_data"
+# Set up default download directory (use temp dir for ephemeral systems)
+CLUTCH_DATA_DIR = Path(tempfile.gettempdir()) / "clutch_data"
 CLUTCH_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 USER_AGENTS = [
@@ -49,78 +29,26 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
 ]
 
-
+# Optional: Initialize GCS client (uncomment if using GCS)
+# def init_gcs_client():
+#     return storage.Client.from_service_account_json(os.getenv('GOOGLE_APPLICATION_CREDENTIALS'))
 
 def setup_driver():
-    """Configure optimized Chrome WebDriver for both local and cloud"""
+    """Configure optimized Chrome WebDriver"""
     options = Options()
     options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("window-size=1200,800")
     options.add_argument("--headless=new")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    
-    # Cloud-specific optimizations
-    if is_cloud_environment():
-        options.add_argument("--disable-web-security")
-        options.add_argument("--disable-features=VizDisplayCompositor")
-        options.add_argument("--window-size=1200,800")
-        options.add_argument("--single-process")  # Important for cloud
-        options.add_argument("--no-zygote")       # Important for cloud
-    else:
-        options.add_argument("window-size=1200,800")
-    
-    try:
-        # Try cloud-specific Chrome path first
-        if is_cloud_environment():
-            # Try common cloud Chrome paths
-            chrome_paths = [
-                "/usr/bin/chromedriver",
-                "/usr/bin/chromium-browser", 
-                "/usr/bin/google-chrome"
-            ]
-            for path in chrome_paths:
-                if os.path.exists(path):
-                    service = Service(path)
-                    break
-            else:
-                # Fallback to ChromeDriverManager
-                service = Service(ChromeDriverManager().install())
-        else:
-            service = Service(ChromeDriverManager().install())
-            
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.set_page_load_timeout(30 if is_cloud_environment() else 20)
-        return driver
-        
-    except Exception as e:
-        st.error(f"Failed to setup Chrome driver: {str(e)}")
-        # Try alternative setup
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.set_page_load_timeout(20)
-        return driver
-
-def process_row_with_retry(row, max_retries=3):
-    """Process a single row with retry logic for cloud stability"""
-    for attempt in range(max_retries):
-        driver = None
-        try:
-            driver = setup_driver()
-            result = process_row(row, driver)
-            return result
-        except Exception as e:
-            if attempt == max_retries - 1:
-                return f"Error after {max_retries} attempts: {str(e)}"
-            time.sleep(2 ** attempt)  # Exponential backoff: 2s, 4s, 8s
-        finally:
-            if driver:
-                try:
-                    driver.quit()
-                except:
-                    pass
+    options.binary_location = "/usr/bin/google-chrome"  # Chrome path in Docker
+    service = Service("/usr/local/bin/chromedriver")  # ChromeDriver path
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.set_page_load_timeout(20)
+    return driver
 
 def process_row(row, driver):
     """Process a single row with an existing driver"""
@@ -154,29 +82,17 @@ def process_row(row, driver):
         return "Error"
 
 def process_batch(df_batch, delay_range, progress_callback=None, batch_id=0):
-    """Process a batch of rows - modified for cloud compatibility"""
+    """Process a batch of rows with a shared driver"""
+    driver = setup_driver()
     results = []
-    
-    if is_cloud_environment():
-        # In cloud, process sequentially to avoid resource issues
+    try:
         for i, (_, row) in enumerate(df_batch.iterrows()):
-            result = process_row_with_retry(row)  # Use retry function
-            results.append(result)
+            results.append(process_row(row, driver))
             if progress_callback:
                 progress_callback(batch_id, i + 1, len(df_batch))
             time.sleep(random.uniform(*delay_range))
-    else:
-        # Local processing with shared driver (your original approach)
-        driver = setup_driver()
-        try:
-            for i, (_, row) in enumerate(df_batch.iterrows()):
-                results.append(process_row(row, driver))
-                if progress_callback:
-                    progress_callback(batch_id, i + 1, len(df_batch))
-                time.sleep(random.uniform(*delay_range))
-        finally:
-            driver.quit()
-    
+    finally:
+        driver.quit()
     return results
 
 def process_single_file(df, filename, ui_progress_callback=None):
@@ -184,14 +100,8 @@ def process_single_file(df, filename, ui_progress_callback=None):
     if 'LinkedIn Profile' not in df.columns:
         df['LinkedIn Profile'] = ''
 
-    # Adjust batch size for cloud environment
-    max_workers = DEFAULT_MAX_WORKERS
-    if is_cloud_environment():
-        batch_size = 5  # Smaller batches for cloud
-        max_workers = 1  # Sequential processing
-    else:
-        batch_size = max(5, len(df) // max_workers)
-    
+    # Split dataframe into batches
+    batch_size = max(5, len(df) // DEFAULT_MAX_WORKERS)
     batches = [df.iloc[i:i + batch_size] for i in range(0, len(df), batch_size)]
     
     total_rows = len(df)
@@ -204,7 +114,7 @@ def process_single_file(df, filename, ui_progress_callback=None):
         if ui_progress_callback:
             ui_progress_callback(current_total, total_rows)
     
-    # Process batches
+    # Process batches sequentially for better progress tracking
     all_results = []
     for i, batch in enumerate(batches):
         if ui_progress_callback:
@@ -213,49 +123,32 @@ def process_single_file(df, filename, ui_progress_callback=None):
         batch_results = process_batch(batch, DEFAULT_DELAY_RANGE, batch_progress_callback, i)
         all_results.extend(batch_results)
         processed_rows += len(batch_results)
-        
-        # Add small delay between batches in cloud
-        if is_cloud_environment() and i < len(batches) - 1:
-            time.sleep(1)
     
     # Update dataframe with results
     df['LinkedIn Profile'] = all_results[:len(df)]
     return df
 
-# Streamlit UI
 def main():
     st.set_page_config(
         page_title="LinkedIn Profile Scraper",
         page_icon="🔍",
         layout="centered"
     )
-    
-    # Add environment detection info
-    if is_cloud_environment():
-        st.info("🌥️ Running in cloud environment with optimized settings")
-    else:
-        st.info("💻 Running in local environment")
 
     # Enhanced CSS to remove white blocks and improve design
     st.markdown("""
     <style>
-    /* Remove default Streamlit styling and white backgrounds */
     .main .block-container {
         padding: 1rem 1rem 10rem;
         background: transparent;
     }
-    
-    /* Remove white background from main content area */
     .stApp > header {
         background: transparent;
     }
-    
     .stApp {
-        background-color: #000000      
+        background-color: #000000;
         min-height: 100vh;
     }
-    
-    /* Remove white backgrounds from all containers */
     .element-container,
     .stMarkdown,
     .stContainer,
@@ -264,21 +157,16 @@ def main():
     section[data-testid="stSidebar"] > div {
         background: transparent !important;
     }
-    
-    /* File uploader styling */
     .stFileUploader > div {
         background: rgba(255, 255, 255, 0.1) !important;
         border: 2px dashed rgba(255, 255, 255, 0.3) !important;
         border-radius: 15px !important;
         backdrop-filter: blur(10px);
     }
-    
     .stFileUploader label {
         color: white !important;
         font-weight: 600 !important;
     }
-    
-    /* Button styling */
     .stButton > button {
         background: linear-gradient(45deg, #ff6b6b, #ffa726) !important;
         color: white !important;
@@ -292,24 +180,18 @@ def main():
         text-transform: uppercase !important;
         letter-spacing: 1px !important;
     }
-    
     .stButton > button:hover {
         transform: translateY(-2px) !important;
         box-shadow: 0 6px 20px rgba(255, 107, 107, 0.4) !important;
     }
-    
-    /* Progress bar styling */
     .stProgress > div > div > div {
         background: linear-gradient(90deg, #ff6b6b, #ffa726) !important;
         border-radius: 10px !important;
     }
-    
     .stProgress > div > div {
         background: rgba(255, 255, 255, 0.2) !important;
         border-radius: 10px !important;
     }
-    
-    /* Alert and message styling */
     .stAlert {
         background: rgba(255, 255, 255, 0.1) !important;
         border: 1px solid rgba(255, 255, 255, 0.2) !important;
@@ -317,28 +199,22 @@ def main():
         backdrop-filter: blur(10px) !important;
         color: white !important;
     }
-    
     .stSuccess {
         background: rgba(76, 175, 80, 0.2) !important;
         border: 1px solid rgba(76, 175, 80, 0.4) !important;
     }
-    
     .stError {
         background: rgba(244, 67, 54, 0.2) !important;
         border: 1px solid rgba(244, 67, 54, 0.4) !important;
     }
-    
     .stWarning {
         background: rgba(255, 152, 0, 0.2) !important;
         border: 1px solid rgba(255, 152, 0, 0.4) !important;
     }
-    
     .stInfo {
         background: rgba(33, 150, 243, 0.2) !important;
         border: 1px solid rgba(33, 150, 243, 0.4) !important;
     }
-    
-    /* Download button styling */
     .stDownloadButton > button {
         background: linear-gradient(45deg, #4CAF50, #45a049) !important;
         color: white !important;
@@ -349,13 +225,10 @@ def main():
         font-weight: 500 !important;
         box-shadow: 0 3px 10px rgba(76, 175, 80, 0.3) !important;
     }
-    
     .stDownloadButton > button:hover {
         transform: translateY(-1px) !important;
         box-shadow: 0 4px 12px rgba(76, 175, 80, 0.4) !important;
     }
-    
-    /* Main header styling */
     .main-header {
         text-align: center;
         padding: 2rem 0;
@@ -369,8 +242,6 @@ def main():
         -webkit-text-fill-color: transparent;
         background-clip: text;
     }
-    
-    /* Glass card effect for processing cards */
     .processing-card {
         background: rgba(255, 255, 255, 0.1) !important;
         padding: 1.5rem;
@@ -381,18 +252,14 @@ def main():
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
         color: white;
     }
-    
     .completed-file {
         background: rgba(76, 175, 80, 0.2) !important;
         border: 1px solid rgba(76, 175, 80, 0.4);
     }
-    
     .processing-file {
         background: rgba(255, 193, 7, 0.2) !important;
         border: 1px solid rgba(255, 193, 7, 0.4);
     }
-    
-    /* Upload section styling */
     .upload-section {
         background: rgba(255, 255, 255, 0.1);
         border: 2px dashed rgba(255, 255, 255, 0.3);
@@ -403,14 +270,11 @@ def main():
         backdrop-filter: blur(15px);
         color: white;
     }
-    
     .upload-section h3 {
         color: white !important;
         font-weight: 600;
         margin-bottom: 1rem;
     }
-    
-    /* Text styling */
     .stMarkdown p,
     .stMarkdown li,
     .stMarkdown h1,
@@ -421,13 +285,10 @@ def main():
     .stMarkdown h6 {
         color: white !important;
     }
-    
     .stMarkdown strong {
         color: #fff !important;
         font-weight: 700 !important;
     }
-    
-    /* Status badges */
     .status-badge {
         display: inline-block;
         padding: 0.25rem 0.75rem;
@@ -437,30 +298,24 @@ def main():
         text-transform: uppercase;
         letter-spacing: 0.5px;
     }
-    
     .status-completed {
         background: rgba(76, 175, 80, 0.3);
         color: #4CAF50;
         border: 1px solid rgba(76, 175, 80, 0.5);
     }
-    
     .status-processing {
         background: rgba(255, 193, 7, 0.3);
         color: #FFC107;
         border: 1px solid rgba(255, 193, 7, 0.5);
     }
-    
     .status-pending {
         background: rgba(158, 158, 158, 0.3);
         color: #9E9E9E;
         border: 1px solid rgba(158, 158, 158, 0.5);
     }
-    
-    /* Animations */
     .animate-bounce {
         animation: bounce 1s infinite;
     }
-    
     @keyframes bounce {
         0%, 20%, 53%, 80%, 100% {
             transform: translate3d(0,0,0);
@@ -475,30 +330,22 @@ def main():
             transform: translate3d(0, -2px, 0);
         }
     }
-    
     .animate-pulse {
         animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
     }
-    
     @keyframes pulse {
         0%, 100% { opacity: 1; }
         50% { opacity: .7; }
     }
-    
-    /* Remove any remaining white backgrounds */
     .css-1d391kg,
     .css-12oz5g7,
     .css-1v3fvcr,
     div[data-baseweb="popover"] {
         background: transparent !important;
     }
-    
-    /* Ensure text is visible */
     .stText {
         color: white !important;
     }
-    
-    /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
@@ -541,6 +388,7 @@ def main():
         
         total_files = len(uploaded_files)
         processed_files = []
+        # gcs_client = init_gcs_client()  # Uncomment if using GCS
         
         # Overall progress
         overall_progress = st.progress(0)
@@ -631,18 +479,18 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # Save processed file
+                    # Store CSV in memory for download
                     output_filename = f"processed_{uploaded_file.name}"
-                    output_path = CLUTCH_DATA_DIR / output_filename
+                    csv_data = processed_df.to_csv(index=False)
+                    processed_files.append((output_filename, csv_data))
                     
-                    # Add timestamp if file exists
-                    if output_path.exists():
-                        timestamp = time.strftime("%Y%m%d_%H%M%S")
-                        output_filename = f"processed_{timestamp}_{uploaded_file.name}"
-                        output_path = CLUTCH_DATA_DIR / output_filename
-                    
-                    processed_df.to_csv(output_path, index=False)
-                    processed_files.append((output_path, processed_df))
+                    # Optional: Save to GCS for persistence (uncomment if needed)
+                    # output_path = CLUTCH_DATA_DIR / output_filename
+                    # if output_path.exists():
+                    #     timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    #     output_filename = f"processed_{timestamp}_{uploaded_file.name}"
+                    # processed_df.to_csv(output_path, index=False)
+                    # gcs_client.bucket('your-bucket-name').blob(f"processed/{output_filename}").upload_from_filename(output_path)
                     
                 finally:
                     # Clean up temporary file
@@ -660,12 +508,11 @@ def main():
                 st.markdown("### 📥 Download Processed Files")
                 
                 # Create download buttons for individual files
-                for file_path, df in processed_files:
-                    csv_data = df.to_csv(index=False)
+                for filename, csv_data in processed_files:
                     st.download_button(
-                        label=f"📄 Download {file_path.name}",
+                        label=f"📄 Download {filename}",
                         data=csv_data,
-                        file_name=file_path.name,
+                        file_name=filename,
                         mime='text/csv'
                     )
                 
@@ -673,9 +520,8 @@ def main():
                 if len(processed_files) > 1:
                     zip_buffer = io.BytesIO()
                     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                        for file_path, df in processed_files:
-                            csv_data = df.to_csv(index=False)
-                            zip_file.writestr(file_path.name, csv_data)
+                        for filename, csv_data in processed_files:
+                            zip_file.writestr(filename, csv_data)
                     
                     st.download_button(
                         label="📦 Download All Files (ZIP)",
@@ -685,7 +531,6 @@ def main():
                     )
                 
                 st.success(f"🎉 Successfully processed {len(processed_files)} files!")
-                st.info(f"📁 Files also saved to: {CLUTCH_DATA_DIR}")
         
         except Exception as e:
             st.error(f"❌ An error occurred: {str(e)}")
