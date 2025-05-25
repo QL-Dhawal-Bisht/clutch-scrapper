@@ -4,9 +4,7 @@ import time
 import random
 import os
 import tempfile
-from pathlib import Path
-import zipfile
-import io
+from concurrent.futures import ThreadPoolExecutor
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -14,24 +12,36 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from google.cloud import storage  # Optional, for GCS
+from webdriver_manager.chrome import ChromeDriverManager
+from pathlib import Path
+import zipfile
+import io
+from google.cloud import storage
+
+def save_to_gcs(df, filename):
+    client = storage.Client()
+    bucket = client.get_bucket("your-bucket-name")
+    blob = bucket.blob(f"clutch_data/{filename}")
+    blob.upload_from_string(df.to_csv(index=False), content_type="text/csv")
+    return f"gs://your-bucket-name/clutch_data/{filename}"
 
 # Configuration
 DEFAULT_DELAY_RANGE = (1, 3)
 DEFAULT_MAX_WORKERS = 3
 
-# Set up default download directory (use temp dir for ephemeral systems)
-CLUTCH_DATA_DIR = Path(tempfile.gettempdir()) / "clutch_data"
+# Set up default download directory
+# DOWNLOADS_DIR = Path.home() / "Downloads"
+# CLUTCH_DATA_DIR = DOWNLOADS_DIR / "clutch_data"
+# CLUTCH_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+DOWNLOADS_DIR = Path("/tmp")
+CLUTCH_DATA_DIR = DOWNLOADS_DIR / "clutch_data"
 CLUTCH_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
 ]
-
-# Optional: Initialize GCS client (uncomment if using GCS)
-# def init_gcs_client():
-#     return storage.Client.from_service_account_json(os.getenv('GOOGLE_APPLICATION_CREDENTIALS'))
 
 def setup_driver():
     """Configure optimized Chrome WebDriver"""
@@ -44,8 +54,8 @@ def setup_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.binary_location = "/usr/bin/google-chrome"  # Chrome path in Docker
-    service = Service("/usr/local/bin/chromedriver")  # ChromeDriver path
+    
+    service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
     driver.set_page_load_timeout(20)
     return driver
@@ -110,6 +120,7 @@ def process_single_file(df, filename, ui_progress_callback=None):
     # Create a shared progress tracking function
     def batch_progress_callback(batch_id, batch_processed, batch_total):
         nonlocal processed_rows
+        # Calculate total processed rows across all batches
         current_total = sum(len(batches[i]) for i in range(batch_id)) + batch_processed
         if ui_progress_callback:
             ui_progress_callback(current_total, total_rows)
@@ -128,6 +139,7 @@ def process_single_file(df, filename, ui_progress_callback=None):
     df['LinkedIn Profile'] = all_results[:len(df)]
     return df
 
+# Streamlit UI
 def main():
     st.set_page_config(
         page_title="LinkedIn Profile Scraper",
@@ -138,17 +150,23 @@ def main():
     # Enhanced CSS to remove white blocks and improve design
     st.markdown("""
     <style>
+    /* Remove default Streamlit styling and white backgrounds */
     .main .block-container {
         padding: 1rem 1rem 10rem;
         background: transparent;
     }
+    
+    /* Remove white background from main content area */
     .stApp > header {
         background: transparent;
     }
+    
     .stApp {
-        background-color: #000000;
+        background-color: #000000      
         min-height: 100vh;
     }
+    
+    /* Remove white backgrounds from all containers */
     .element-container,
     .stMarkdown,
     .stContainer,
@@ -157,16 +175,21 @@ def main():
     section[data-testid="stSidebar"] > div {
         background: transparent !important;
     }
+    
+    /* File uploader styling */
     .stFileUploader > div {
         background: rgba(255, 255, 255, 0.1) !important;
         border: 2px dashed rgba(255, 255, 255, 0.3) !important;
         border-radius: 15px !important;
         backdrop-filter: blur(10px);
     }
+    
     .stFileUploader label {
         color: white !important;
         font-weight: 600 !important;
     }
+    
+    /* Button styling */
     .stButton > button {
         background: linear-gradient(45deg, #ff6b6b, #ffa726) !important;
         color: white !important;
@@ -180,18 +203,24 @@ def main():
         text-transform: uppercase !important;
         letter-spacing: 1px !important;
     }
+    
     .stButton > button:hover {
         transform: translateY(-2px) !important;
         box-shadow: 0 6px 20px rgba(255, 107, 107, 0.4) !important;
     }
+    
+    /* Progress bar styling */
     .stProgress > div > div > div {
         background: linear-gradient(90deg, #ff6b6b, #ffa726) !important;
         border-radius: 10px !important;
     }
+    
     .stProgress > div > div {
         background: rgba(255, 255, 255, 0.2) !important;
         border-radius: 10px !important;
     }
+    
+    /* Alert and message styling */
     .stAlert {
         background: rgba(255, 255, 255, 0.1) !important;
         border: 1px solid rgba(255, 255, 255, 0.2) !important;
@@ -199,22 +228,28 @@ def main():
         backdrop-filter: blur(10px) !important;
         color: white !important;
     }
+    
     .stSuccess {
         background: rgba(76, 175, 80, 0.2) !important;
         border: 1px solid rgba(76, 175, 80, 0.4) !important;
     }
+    
     .stError {
         background: rgba(244, 67, 54, 0.2) !important;
         border: 1px solid rgba(244, 67, 54, 0.4) !important;
     }
+    
     .stWarning {
         background: rgba(255, 152, 0, 0.2) !important;
         border: 1px solid rgba(255, 152, 0, 0.4) !important;
     }
+    
     .stInfo {
         background: rgba(33, 150, 243, 0.2) !important;
         border: 1px solid rgba(33, 150, 243, 0.4) !important;
     }
+    
+    /* Download button styling */
     .stDownloadButton > button {
         background: linear-gradient(45deg, #4CAF50, #45a049) !important;
         color: white !important;
@@ -225,10 +260,13 @@ def main():
         font-weight: 500 !important;
         box-shadow: 0 3px 10px rgba(76, 175, 80, 0.3) !important;
     }
+    
     .stDownloadButton > button:hover {
         transform: translateY(-1px) !important;
         box-shadow: 0 4px 12px rgba(76, 175, 80, 0.4) !important;
     }
+    
+    /* Main header styling */
     .main-header {
         text-align: center;
         padding: 2rem 0;
@@ -242,6 +280,8 @@ def main():
         -webkit-text-fill-color: transparent;
         background-clip: text;
     }
+    
+    /* Glass card effect for processing cards */
     .processing-card {
         background: rgba(255, 255, 255, 0.1) !important;
         padding: 1.5rem;
@@ -252,14 +292,18 @@ def main():
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
         color: white;
     }
+    
     .completed-file {
         background: rgba(76, 175, 80, 0.2) !important;
         border: 1px solid rgba(76, 175, 80, 0.4);
     }
+    
     .processing-file {
         background: rgba(255, 193, 7, 0.2) !important;
         border: 1px solid rgba(255, 193, 7, 0.4);
     }
+    
+    /* Upload section styling */
     .upload-section {
         background: rgba(255, 255, 255, 0.1);
         border: 2px dashed rgba(255, 255, 255, 0.3);
@@ -270,11 +314,14 @@ def main():
         backdrop-filter: blur(15px);
         color: white;
     }
+    
     .upload-section h3 {
         color: white !important;
         font-weight: 600;
         margin-bottom: 1rem;
     }
+    
+    /* Text styling */
     .stMarkdown p,
     .stMarkdown li,
     .stMarkdown h1,
@@ -285,10 +332,13 @@ def main():
     .stMarkdown h6 {
         color: white !important;
     }
+    
     .stMarkdown strong {
         color: #fff !important;
         font-weight: 700 !important;
     }
+    
+    /* Status badges */
     .status-badge {
         display: inline-block;
         padding: 0.25rem 0.75rem;
@@ -298,24 +348,30 @@ def main():
         text-transform: uppercase;
         letter-spacing: 0.5px;
     }
+    
     .status-completed {
         background: rgba(76, 175, 80, 0.3);
         color: #4CAF50;
         border: 1px solid rgba(76, 175, 80, 0.5);
     }
+    
     .status-processing {
         background: rgba(255, 193, 7, 0.3);
         color: #FFC107;
         border: 1px solid rgba(255, 193, 7, 0.5);
     }
+    
     .status-pending {
         background: rgba(158, 158, 158, 0.3);
         color: #9E9E9E;
         border: 1px solid rgba(158, 158, 158, 0.5);
     }
+    
+    /* Animations */
     .animate-bounce {
         animation: bounce 1s infinite;
     }
+    
     @keyframes bounce {
         0%, 20%, 53%, 80%, 100% {
             transform: translate3d(0,0,0);
@@ -330,22 +386,30 @@ def main():
             transform: translate3d(0, -2px, 0);
         }
     }
+    
     .animate-pulse {
         animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
     }
+    
     @keyframes pulse {
         0%, 100% { opacity: 1; }
         50% { opacity: .7; }
     }
+    
+    /* Remove any remaining white backgrounds */
     .css-1d391kg,
     .css-12oz5g7,
     .css-1v3fvcr,
     div[data-baseweb="popover"] {
         background: transparent !important;
     }
+    
+    /* Ensure text is visible */
     .stText {
         color: white !important;
     }
+    
+    /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
@@ -388,7 +452,6 @@ def main():
         
         total_files = len(uploaded_files)
         processed_files = []
-        # gcs_client = init_gcs_client()  # Uncomment if using GCS
         
         # Overall progress
         overall_progress = st.progress(0)
@@ -479,18 +542,18 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # Store CSV in memory for download
+                    # Save processed file
                     output_filename = f"processed_{uploaded_file.name}"
-                    csv_data = processed_df.to_csv(index=False)
-                    processed_files.append((output_filename, csv_data))
+                    output_path = CLUTCH_DATA_DIR / output_filename
                     
-                    # Optional: Save to GCS for persistence (uncomment if needed)
-                    # output_path = CLUTCH_DATA_DIR / output_filename
-                    # if output_path.exists():
-                    #     timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    #     output_filename = f"processed_{timestamp}_{uploaded_file.name}"
-                    # processed_df.to_csv(output_path, index=False)
-                    # gcs_client.bucket('your-bucket-name').blob(f"processed/{output_filename}").upload_from_filename(output_path)
+                    # Add timestamp if file exists
+                    if output_path.exists():
+                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        output_filename = f"processed_{timestamp}_{uploaded_file.name}"
+                        output_path = CLUTCH_DATA_DIR / output_filename
+                    
+                    processed_df.to_csv(output_path, index=False)
+                    processed_files.append((output_path, processed_df))
                     
                 finally:
                     # Clean up temporary file
@@ -508,11 +571,12 @@ def main():
                 st.markdown("### 📥 Download Processed Files")
                 
                 # Create download buttons for individual files
-                for filename, csv_data in processed_files:
+                for file_path, df in processed_files:
+                    csv_data = df.to_csv(index=False)
                     st.download_button(
-                        label=f"📄 Download {filename}",
+                        label=f"📄 Download {file_path.name}",
                         data=csv_data,
-                        file_name=filename,
+                        file_name=file_path.name,
                         mime='text/csv'
                     )
                 
@@ -520,8 +584,9 @@ def main():
                 if len(processed_files) > 1:
                     zip_buffer = io.BytesIO()
                     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                        for filename, csv_data in processed_files:
-                            zip_file.writestr(filename, csv_data)
+                        for file_path, df in processed_files:
+                            csv_data = df.to_csv(index=False)
+                            zip_file.writestr(file_path.name, csv_data)
                     
                     st.download_button(
                         label="📦 Download All Files (ZIP)",
@@ -531,6 +596,7 @@ def main():
                     )
                 
                 st.success(f"🎉 Successfully processed {len(processed_files)} files!")
+                st.info(f"📁 Files also saved to: {CLUTCH_DATA_DIR}")
         
         except Exception as e:
             st.error(f"❌ An error occurred: {str(e)}")
