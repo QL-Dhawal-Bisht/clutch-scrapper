@@ -2,22 +2,11 @@ FROM python:3.9-slim
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-wget \
-unzip \
-curl \
-gnupg \
-libglib2.0-0 \
-libnss3 \
-libgconf-2-4 \
-libfontconfig1 \
-libxrender1 \
-libxtst6 \
-libxi6 \
-libatk1.0-0 \
-libatk-bridge2.0-0 \
-libgtk-3-0 \
-&& rm -rf /var/lib/apt/lists/*
-
+    wget unzip curl gnupg \
+    libglib2.0-0 libnss3 libgconf-2-4 libfontconfig1 \
+    libxrender1 libxtst6 libxi6 libatk1.0-0 \
+    libatk-bridge2.0-0 libgtk-3-0 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Chrome
 RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
@@ -28,15 +17,14 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
 # Set working directory
 WORKDIR /app
 
-# Copy application files
+# Copy app files
 COPY . .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Expose Streamlit port
-EXPOSE 8501
+# Expose the port Cloud Run expects
+EXPOSE 8080
 
-# Command to run the app
-CMD ["streamlit", "run", "app.py", "--server.port=${PORT}", "--server.address=0.0.0.0"]
-
+# Run the app
+CMD ["streamlit", "run", "app.py", "--server.port=8080", "--server.address=0.0.0.0"]
