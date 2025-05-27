@@ -18,12 +18,12 @@ import zipfile
 import io
 from google.cloud import storage
 
-def save_to_gcs(df, filename):
-    client = storage.Client()
-    bucket = client.get_bucket("your-bucket-name")
-    blob = bucket.blob(f"clutch_data/{filename}")
-    blob.upload_from_string(df.to_csv(index=False), content_type="text/csv")
-    return f"gs://your-bucket-name/clutch_data/{filename}"
+# def save_to_gcs(df, filename):
+#     client = storage.Client()
+#     bucket = client.get_bucket("your-bucket-name")
+#     blob = bucket.blob(f"clutch_data/{filename}")
+#     blob.upload_from_string(df.to_csv(index=False), content_type="text/csv")
+#     return f"gs://your-bucket-name/clutch_data/{filename}"
 
 # Configuration
 DEFAULT_DELAY_RANGE = (1, 3)
